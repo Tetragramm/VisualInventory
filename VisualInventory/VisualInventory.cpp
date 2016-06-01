@@ -158,6 +158,170 @@ static void drawSquares(cv::Mat& image, const std::vector<std::vector<cv::Point>
     imshow("Squares", image);
 }
 
+cv::Mat video2Panorama(cv::String filename)
+{
+    using namespace cv;
+    //Create vectors and Mats
+    Mat image;
+    std::vector<Mat> images;
+    std::vector<Mat> transforms;
+    Mat panorama;
+    Mat affine(2, 3, CV_64F);
+
+    //Create ORB descriptors, memory, and matcher
+    std::vector<KeyPoint> pKps, iKps;
+    Mat pDesc, iDesc;
+    Ptr<ORB> pORB = ORB::create(10000);
+    Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming");
+    std::vector<DMatch> matches;
+
+    //Init Video Reader
+    VideoCapture vidIn(filename);
+    //Error Checking
+    if (!vidIn.isOpened())
+        return Mat();
+
+    //Init First Image
+    vidIn.read(image);
+
+    pORB->detectAndCompute(image, noArray(), pKps, pDesc);
+
+    affine.setTo(0);
+    affine.at<double>(0, 1) = -1;
+    affine.at<double>(1, 0) = 1;
+    affine.at<double>(0, 2) = 720;
+
+    images.push_back(image.clone());
+    transforms.push_back(affine.clone());
+
+
+    while (vidIn.read(image))
+    {
+        //Detect Keypoints and find matches
+        pORB->detectAndCompute(image, noArray(), iKps, iDesc);
+        matcher->match(iDesc, pDesc, matches);
+
+        double max_dist = 0; double min_dist = 100;
+        //-- Quick calculation of max and min distances between keypoints
+        for (int i = 0; i < iDesc.rows; i++)
+        {
+            double dist = matches[i].distance;
+            if (dist < min_dist)
+                min_dist = dist;
+            if (dist > max_dist)
+                max_dist = dist;
+        }
+
+        //-- Draw only "good" matches (i.e. whose distance is less than 3*min_dist )
+        std::vector< Point2f > pPts, iPts;
+        for (int i = 0; i < iDesc.rows; i++)
+        {
+            if (matches[i].distance < 5 * min_dist)
+            {
+                pPts.push_back(pKps[matches[i].trainIdx].pt);
+                iPts.push_back(iKps[matches[i].queryIdx].pt);
+            }
+        }
+
+        //If there are enough points
+        if (pPts.size() > 20)
+        {
+            //We want to match to the warped locations
+            transform(pPts, pPts, affine);
+
+            //Estimate transform from current image to warped previous
+            Mat temp = estimateRigidTransform(iPts, pPts, false);
+            //If it worked
+            if (!temp.empty())
+            {
+                //Save the image, transform, and set the new set of keypoints and descriptors
+                images.push_back(image.clone());
+                transforms.push_back(temp.clone());
+                pKps = iKps;
+                iDesc.copyTo(pDesc);
+                temp.copyTo(affine);
+            }
+        }
+    }
+
+    //Find the size of the panorama by transforming each of the four corners of the image and finding the bounds
+    std::vector<Point2f> testPoints, transformedPoints;
+    testPoints.push_back(Point2f(0, 0));
+    testPoints.push_back(Point2f(images[1].cols, 0));
+    testPoints.push_back(Point2f(0, images[1].rows));
+    testPoints.push_back(Point2f(images[1].cols, images[1].rows));
+    Size panoSize(0, 0), orig(10000, 10000);
+    for (int i = 0; i < images.size(); ++i)
+    {
+        transform(testPoints, transformedPoints, transforms[i]);
+        panoSize.width = MAX(cvCeil(transformedPoints[0].x), panoSize.width);
+        panoSize.width = MAX(cvCeil(transformedPoints[1].x), panoSize.width);
+        panoSize.width = MAX(cvCeil(transformedPoints[2].x), panoSize.width);
+        panoSize.width = MAX(cvCeil(transformedPoints[3].x), panoSize.width);
+        panoSize.height = MAX(cvCeil(transformedPoints[0].y), panoSize.height);
+        panoSize.height = MAX(cvCeil(transformedPoints[1].y), panoSize.height);
+        panoSize.height = MAX(cvCeil(transformedPoints[2].y), panoSize.height);
+        panoSize.height = MAX(cvCeil(transformedPoints[3].y), panoSize.height);
+
+        orig.width = MIN(cvFloor(transformedPoints[0].x), orig.width);
+        orig.width = MIN(cvFloor(transformedPoints[1].x), orig.width);
+        orig.width = MIN(cvFloor(transformedPoints[2].x), orig.width);
+        orig.width = MIN(cvFloor(transformedPoints[3].x), orig.width);
+        orig.height = MIN(cvFloor(transformedPoints[0].y), orig.height);
+        orig.height = MIN(cvFloor(transformedPoints[1].y), orig.height);
+        orig.height = MIN(cvFloor(transformedPoints[2].y), orig.height);
+        orig.height = MIN(cvFloor(transformedPoints[3].y), orig.height);
+    }
+
+    panoSize.height -= orig.height;
+    panoSize.width -= orig.width;
+
+
+    //Smooth the vertical direction
+    Mat avg(1, images.size(), CV_64F), runningAvg, rot;
+
+    for (int i = 0; i < images.size(); ++i)
+        avg.at<double>(i) = transforms[i].at<double>(1, 2);
+    blur(avg, runningAvg, Size(500, 1), Point(-1, -1), BORDER_REPLICATE);
+
+    //Adjust the size by that smoothing
+    double min, max;
+    minMaxIdx(runningAvg, &min, &max);
+    panoSize.height -= max;
+
+    subtract(avg, runningAvg, avg);
+    add(avg, -orig.height, avg);
+
+    //Smooth the rotation so it doesn't fall off the way it did before.
+    for (int i = 0; i < images.size(); ++i)
+    {
+        transforms[i].at<double>(1, 2) = avg.at<double>(i);
+        double angle = atan2(-transforms[i].at<double>(0, 1), transforms[i].at<double>(0, 0));
+        avg.at<double>(i) = angle * 180 / CV_PI;
+    }
+
+    blur(avg, runningAvg, Size(300, 1), Point(-1, -1), BORDER_REFLECT);
+    for (int i = 0; i < images.size(); ++i)
+    {
+        rot = getRotationMatrix2D(Point2f(images[i].cols / 2, images[i].rows / 2), runningAvg.at<double>(i) - avg.at<double>(0), 1);
+        transforms[i](Rect(0, 0, 2, 2)) = rot(Rect(0, 0, 2, 2)) * transforms[i](Rect(0, 0, 2, 2));
+        transforms[i].at<double>(0, 2) -= rot.at<double>(0, 2);
+        transforms[i].at<double>(1, 2) -= rot.at<double>(1, 2);
+    }
+
+    //Create the panorama
+    panorama.create(panoSize, CV_8UC3);
+    panorama.setTo(0);
+
+    //Warp the images to the panorama
+    for (int i = 0; i < images.size(); ++i)
+    {
+        warpAffine(images[i], panorama, transforms[i], Size(panorama.cols, panorama.rows), 1, BORDER_TRANSPARENT);
+    }
+
+    return panorama;
+}
+
 int main()
 {
     LARGE_INTEGER start, stop, freq;
