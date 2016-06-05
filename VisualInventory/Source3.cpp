@@ -187,7 +187,7 @@ int main() {
 	int newHeight = minHeight - (SECTION_HEIGHT - min(minY1,minY2));
 
 	for (int i = 0; i < subImageDiffs.size(); i++) {
-		int y = SECTION_HEIGHT - impose((int)usedPPts[i].y);
+		int y = SECTION_HEIGHT - impose((int)min(usedPPts[i].y,usedIPts[i].y));
 
 		subImageDiffs[i] = subImageDiffs[i](Rect(0, y, subImageDiffs[i].cols, newHeight));
 	}
@@ -199,7 +199,7 @@ int main() {
 
 	}
 	imshow("diff", diffPano);
-	imwrite("diff.png", diffPano);
+	imwrite("difference.png", diffPano);
 	waitKey();
 
 	return 0;
