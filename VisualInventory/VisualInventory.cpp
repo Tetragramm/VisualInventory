@@ -280,9 +280,27 @@ cv::Mat video2Panorama(cv::String filename)
     //Smooth the vertical direction
     Mat avg(1, images.size(), CV_64F), runningAvg, rot;
 
+
+    //Smooth the rotation so it doesn't fall off the way it did before.
+    for (int i = 0; i < images.size(); ++i)
+    {
+        double angle = atan2(-transforms[i].at<double>(0, 1), transforms[i].at<double>(0, 0));
+        avg.at<double>(i) = angle * 180 / CV_PI;
+    }
+
+    blur(avg, runningAvg, Size(300, 1), Point(-1, -1), BORDER_REPLICATE);
+    for (int i = 0; i < images.size(); ++i)
+    {
+        rot = getRotationMatrix2D(Point2f(images[i].cols / 2, images[i].rows / 2), (runningAvg.at<double>(i) - avg.at<double>(0)), 1);
+        transforms[i](Rect(0, 0, 3, 2)) = rot(Rect(0, 0, 2, 2)) * transforms[i](Rect(0, 0, 3, 2));
+        transforms[i].at<double>(0, 2) += rot.at<double>(0, 2);
+        transforms[i].at<double>(1, 2) += rot.at<double>(1, 2);
+    }
+
     for (int i = 0; i < images.size(); ++i)
         avg.at<double>(i) = transforms[i].at<double>(1, 2);
-    blur(avg, runningAvg, Size(500, 1), Point(-1, -1), BORDER_REPLICATE);
+
+    blur(avg, runningAvg, Size(100, 1), Point(-1, -1), BORDER_REPLICATE);
 
     //Adjust the size by that smoothing
     double min, max;
@@ -290,36 +308,226 @@ cv::Mat video2Panorama(cv::String filename)
     panoSize.height -= max;
 
     subtract(avg, runningAvg, avg);
-    add(avg, -orig.height, avg);
+    add(avg, orig.height, avg);
 
-    //Smooth the rotation so it doesn't fall off the way it did before.
     for (int i = 0; i < images.size(); ++i)
-    {
         transforms[i].at<double>(1, 2) = avg.at<double>(i);
-        double angle = atan2(-transforms[i].at<double>(0, 1), transforms[i].at<double>(0, 0));
-        avg.at<double>(i) = angle * 180 / CV_PI;
-    }
 
-    blur(avg, runningAvg, Size(300, 1), Point(-1, -1), BORDER_REFLECT);
+    panoSize.width = 0;
+    panoSize.height = 0;
     for (int i = 0; i < images.size(); ++i)
     {
-        rot = getRotationMatrix2D(Point2f(images[i].cols / 2, images[i].rows / 2), runningAvg.at<double>(i) - avg.at<double>(0), 1);
-        transforms[i](Rect(0, 0, 2, 2)) = rot(Rect(0, 0, 2, 2)) * transforms[i](Rect(0, 0, 2, 2));
-        transforms[i].at<double>(0, 2) -= rot.at<double>(0, 2);
-        transforms[i].at<double>(1, 2) -= rot.at<double>(1, 2);
+        transform(testPoints, transformedPoints, transforms[i]);
+        panoSize.width = MAX(cvCeil(transformedPoints[0].x), panoSize.width);
+        panoSize.width = MAX(cvCeil(transformedPoints[1].x), panoSize.width);
+        panoSize.width = MAX(cvCeil(transformedPoints[2].x), panoSize.width);
+        panoSize.width = MAX(cvCeil(transformedPoints[3].x), panoSize.width);
+        panoSize.height = MAX(cvCeil(transformedPoints[0].y), panoSize.height);
+        panoSize.height = MAX(cvCeil(transformedPoints[1].y), panoSize.height);
+        panoSize.height = MAX(cvCeil(transformedPoints[2].y), panoSize.height);
+        panoSize.height = MAX(cvCeil(transformedPoints[3].y), panoSize.height);
     }
+
 
     //Create the panorama
     panorama.create(panoSize, CV_8UC3);
     panorama.setTo(0);
+    cv::Mat tempPano(panoSize, CV_8UC3);
+    cv::Mat maskPano(panoSize, CV_8UC3);
+    cv::Mat mask(images[0].rows, images[0].cols, CV_8UC1);
+    mask.setTo(0);
+    mask.rowRange(mask.rows / 2-50, mask.rows / 2+50).setTo(255);
 
-    //Warp the images to the panorama
+    //Warp the images to the panorama   
     for (int i = 0; i < images.size(); ++i)
     {
-        warpAffine(images[i], panorama, transforms[i], Size(panorama.cols, panorama.rows), 1, BORDER_TRANSPARENT);
+        warpAffine(images[i], tempPano, transforms[i], Size(panorama.cols, panorama.rows), 1, BORDER_TRANSPARENT);
+        warpAffine(mask, maskPano, transforms[i], Size(panorama.cols, panorama.rows), 1, BORDER_CONSTANT);
+        tempPano.copyTo(panorama, maskPano);
     }
 
     return panorama;
+}
+
+const int SECTION_HEIGHT = 50;
+
+int impose(int x) {
+    return x%SECTION_HEIGHT;
+}
+
+void bubbleSort(std::vector<cv::Point2f>& input1, std::vector<cv::Point2f>& output1, std::vector<cv::Point2f>& input2, std::vector<cv::Point2f>& output2) {
+    for (int i = 0; i < input1.size(); i++) {
+        output1.push_back(input1[i]);
+        output2.push_back(input2[i]);
+    }
+    for (int i = 0; i < output1.size(); i++) {
+        bool isSorted = true;
+        for (int i = 0; i < output1.size() - 1; i++) {
+            if (output1[i].x > output1[i + 1].x) {
+                isSorted = false;
+                cv::Point2f temp = output1[i];
+                output1[i] = output1[i + 1];
+                output1[i + 1] = temp;
+                temp = output2[i];
+                output2[i] = output2[i + 1];
+                output2[i + 1] = temp;
+            }
+        }
+
+        if (isSorted) break;
+    }
+    int turnoverIndex = -1;
+    for (int i = 0; i < output2.size() - 1; i++) {
+        if (output2[i].x > output2[i + 1].x) {
+            if (turnoverIndex == -1) {
+                turnoverIndex = i + 1;
+            }
+            else {
+                output1.erase(output1.begin() + turnoverIndex);
+                output2.erase(output2.begin() + turnoverIndex);
+                i--;
+                turnoverIndex = i + 1;
+            }
+        }
+    }
+}
+
+void diffSections()
+{
+    LARGE_INTEGER start, stop, freq;
+    using namespace cv;
+    //dist::init(1280, 720);
+
+    Mat pano, pano2, image;
+    Ptr<ORB> pORB = ORB::create(10000);
+    Ptr<ORB> iORB = ORB::create(2000);
+    std::vector<KeyPoint> pKps, iKps;
+    Mat pDesc, iDesc;
+
+    //for (int i = 0; i < 250; ++i)
+    //vidIn.read(image);
+    //read the panoramas in
+    pano = imread("Gallery_1_(1).png");
+    pano2 = imread("Gallery_1_(2).png");
+
+    int height1 = pano.rows - SECTION_HEIGHT;
+    int height2 = pano2.rows - SECTION_HEIGHT;
+
+    //std::cout << pano.cols << std::endl;
+    //compute keypoints
+    pORB->detectAndCompute(pano, noArray(), pKps, pDesc);
+    pORB->detectAndCompute(pano2, noArray(), iKps, iDesc);
+    //compute the matches
+    Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming");
+    std::vector< DMatch > matches;
+    matcher->match(pDesc, iDesc, matches);
+
+    double max_dist = 0; double min_dist = 100;
+    //-- Quick calculation of max and min distances between keypoints
+    for (int i = 0; i < pDesc.rows; i++)
+    {
+        double dist = matches[i].distance;
+        if (dist < min_dist) min_dist = dist;
+        if (dist > max_dist) max_dist = dist;
+    }
+    printf("-- Max dist : %f \n", max_dist);
+    printf("-- Min dist : %f \n", min_dist);
+
+    std::vector< DMatch > good_matches;
+    std::vector<Point2f> pPts, iPts;
+    //find the "good matches"
+    for (int i = 0; i < pDesc.rows; i++)
+    {
+        if (matches[i].distance <= max(10 * min_dist, 0.02))
+        {
+            good_matches.push_back(matches[i]);
+            pPts.push_back(pKps[matches[i].queryIdx].pt);
+            iPts.push_back(iKps[matches[i].trainIdx].pt);
+        }
+    }
+    std::vector<cv::Point2f> sortedPPts, sortedIPts;
+    //sort keypoints into the two sorted vectors above
+    bubbleSort(pPts, sortedPPts, iPts, sortedIPts);
+    //vectors of the various subimages of the panorama
+    std::vector<Mat> subImages, subImages2;
+    std::vector<Point2f> usedPPts, usedIPts;
+    int index = 0;
+
+    for (int i = 1; i < sortedPPts.size() - 1; i++) {
+        if (sortedPPts[i].x - sortedPPts[index].x < 250) continue;
+        if (sortedIPts[index].x > sortedIPts[i].x) {
+            subImages.push_back(pano(Rect(sortedPPts[index].x, impose((int)sortedPPts[index].y), sortedPPts[i].x - sortedPPts[index].x, height1)));
+            Mat image1 = pano2(Rect(sortedIPts[index].x, impose((int)sortedIPts[index].y), pano2.cols - sortedIPts[index].x, height2));
+            Mat image2 = pano2(Rect(0, impose((int)sortedIPts[index].y), sortedIPts[i].x, height2));
+            hconcat(image1, image2, image1);
+            subImages2.push_back(image1);
+        }
+        else {
+            subImages.push_back(pano(Rect(sortedPPts[index].x, impose((int)sortedPPts[index].y), sortedPPts[i].x - sortedPPts[index].x, height1)));
+            subImages2.push_back(pano2(Rect(sortedIPts[index].x, impose((int)sortedIPts[index].y), sortedIPts[i].x - sortedIPts[index].x, height2)));
+        }
+        usedPPts.push_back(sortedPPts[index]);
+        usedIPts.push_back(sortedIPts[index]);
+        index = i;
+    }
+    usedPPts.push_back(sortedPPts[index]);
+    usedIPts.push_back(sortedIPts[index]);
+    if (sortedIPts[index].x > sortedIPts[0].x) {
+        Mat i1 = pano(Rect(sortedPPts[index].x, impose((int)sortedPPts[index].y), pano.cols - sortedPPts[index].x, height1));
+        Mat i2 = pano(Rect(0, impose((int)sortedPPts[index].y), sortedPPts[0].x, height1));
+        hconcat(i1, i2, i1);
+        subImages.push_back(i1);
+        Mat image1 = pano2(Rect(sortedIPts[index].x, impose((int)sortedIPts[index].y), pano2.cols - sortedIPts[index].x, height2));
+        Mat image2 = pano2(Rect(0, impose((int)sortedIPts[index].y), sortedIPts[0].x, height2));
+        hconcat(image1, image2, image1);
+        subImages2.push_back(image1);
+    }
+    else {
+        Mat i1 = pano(Rect(sortedPPts[index].x, impose((int)sortedPPts[index].y), pano.cols - sortedPPts[index].x, height1));
+        Mat i2 = pano(Rect(0, impose((int)sortedPPts[index].y), sortedPPts[0].x, height1));
+        hconcat(i1, i2, i1);
+        subImages.push_back(i1);
+        subImages2.push_back(pano2(Rect(sortedIPts[index].x, impose((int)sortedIPts[index].y), sortedIPts[0].x - sortedIPts[index].x, height2)));
+    }
+    int minY1 = 0;
+
+    int minY2 = 0;
+
+    int minHeight = min(height1, height2);
+
+    for (int i = 0; i < usedPPts.size(); i++) {
+        minY1 = min(minY1, impose((int)usedPPts[i].y));
+    }
+
+    for (int i = 0; i < usedIPts.size(); i++) {
+        minY2 = min(minY2, impose((int)usedIPts[i].y));
+    }
+    std::vector<Mat> subImageDiffs;
+    for (int i = 0; i < subImages.size(); i++) {
+        int minWdith = min(subImages[i].cols, subImages2[i].cols);
+        Mat image1 = subImages[i](Rect(0, 0, minWdith, minHeight));
+        Mat image2 = subImages2[i](Rect(0, 0, minWdith, minHeight));
+        absdiff(image1, image2, image1);
+        subImageDiffs.push_back(image1);
+    }
+
+    int newHeight = minHeight - (SECTION_HEIGHT - min(minY1, minY2));
+
+    for (int i = 0; i < subImageDiffs.size(); i++) {
+        int y = SECTION_HEIGHT - impose((int)min(usedPPts[i].y, usedIPts[i].y));
+
+        subImageDiffs[i] = subImageDiffs[i](Rect(0, y, subImageDiffs[i].cols, newHeight));
+    }
+
+    Mat diffPano = subImageDiffs[0];
+
+    for (int i = 1; i < subImageDiffs.size(); i++) {
+        hconcat(diffPano, subImageDiffs[i], diffPano);
+
+    }
+    imshow("diff", diffPano);
+    imwrite("difference3.png", diffPano);
+    waitKey();
 }
 
 int main()
@@ -327,6 +535,11 @@ int main()
     LARGE_INTEGER start, stop, freq;
     using namespace cv;
     dist::init(1280, 720);
+
+    Mat writingOut = video2Panorama("C:/Users/f35js/Documents/Visual Studio 2015/Projects/OpenCV Test/OpenCV Test/Gallery_1_ (2).mp4");
+    imwrite("Gallery_1_(2).png", writingOut);
+
+    diffSections();
 
     Mat pano, pano2, image;
     VideoCapture vidIn("Gallery4.mp4");
