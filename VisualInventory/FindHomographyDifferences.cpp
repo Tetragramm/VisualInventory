@@ -21,6 +21,120 @@
 #include <opencv2/videostab.hpp>
 #include <string.h>
 
+
+int threshHigh = 255, N = 1;
+int threshLow = 150;
+
+
+static double angle(cv::Point pt1, cv::Point pt2, cv::Point pt0)
+{
+    double dx1 = pt1.x - pt0.x;
+    double dy1 = pt1.y - pt0.y;
+    double dx2 = pt2.x - pt0.x;
+    double dy2 = pt2.y - pt0.y;
+    return (dx1*dx2 + dy1*dy2) / sqrt((dx1*dx1 + dy1*dy1)*(dx2*dx2 + dy2*dy2) + 1e-10);
+}
+
+static void findSquares(const cv::Mat& image, std::vector<std::vector<cv::Point> >& squares)
+{
+    using namespace cv;
+    squares.clear();
+
+    Mat pyr, timg, temp(image.size(), CV_8U), gray, gray0;
+
+    // down-scale and upscale the image to filter out the noise
+    pyrDown(image, pyr, Size(image.cols / 2, image.rows / 2));
+    pyrUp(pyr, timg, image.size());
+    std::vector<std::vector<Point> > contours;
+		
+
+    // find squares in every color plane of the image
+    for (int c = 0; c < 3; c++)
+    {
+        gray0.create(image.size(), CV_8U);
+        int ch[] = { c, 0 };
+        mixChannels(&timg, 1, &gray0, 1, ch, 1);
+        //imshow("gray0", gray0);
+
+        // try several threshold levels
+        for (int l = 0; l < N; l++)
+        {
+            // hack: use Canny instead of zero threshold level.
+            // Canny helps to catch squares with gradient shading
+            if (l == 0)
+            {
+                // apply Canny. Take the upper threshold from slider
+                // and set the lower to 0 (which forces edges merging)
+                gray = gray0 >= 50;
+                Canny(gray, gray, threshLow, threshHigh, 5);
+                // dilate canny output to remove potential
+                // holes between edge segments
+                dilate(gray, gray, Mat(), Point(-1, -1));
+                //imshow("canny", gray);
+                //waitKey();
+            }
+            else
+            {
+                // apply threshold if l!=0:
+                //     tgray(x,y) = gray(x,y) < (l+1)*255/N ? 255 : 0
+                gray = gray0 >= (l + 1) * 255 / N;
+            }
+
+            // find contours and store them all as a list
+            findContours(gray, contours, RETR_LIST, CHAIN_APPROX_SIMPLE);
+
+            std::vector<Point> approx;
+
+            // test each contour
+            for (size_t i = 0; i < contours.size(); i++)
+            {
+                // approximate contour with accuracy proportional
+                // to the contour perimeter
+                approxPolyDP(Mat(contours[i]), approx, arcLength(Mat(contours[i]), true)*0.02, true);
+
+                // square contours should have 4 vertices after approximation
+                // relatively large area (to filter out noisy contours)
+                // and be convex.
+                // Note: absolute value of an area is used because
+                // area may be positive or negative - in accordance with the
+                // contour orientation
+                if (approx.size() == 4 &&
+                    fabs(contourArea(Mat(approx))) > 1000 &&
+                    isContourConvex(Mat(approx)))
+                {
+                    double maxCosine = 0;
+
+                    for (int j = 2; j < 5; j++)
+                    {
+                        // find the maximum cosine of the angle between joint edges
+                        double cosine = fabs(angle(approx[j % 4], approx[j - 2], approx[j - 1]));
+                        maxCosine = MAX(maxCosine, cosine);
+                    }
+
+                    // if cosines of all angles are small
+                    // (all angles are ~90 degree) then write quandrange
+                    // vertices to resultant sequence
+                    if (maxCosine < 0.2)
+                        squares.push_back(approx);
+                }
+            }
+        }
+    }
+}
+
+// the function draws all the squares in the image
+static void drawSquares(cv::Mat& image, const std::vector<std::vector<cv::Point> >& squares)
+{
+    using namespace cv;
+    for (size_t i = 0; i < squares.size(); i++)
+    {
+        const Point* p = &squares[i][0];
+        int n = (int)squares[i].size();
+        polylines(image, &p, &n, 1, true, Scalar(0, 255, 0), 3, LINE_AA);
+    }
+
+    imshow("Squares", image);
+}
 void bubbleSort(std::vector<cv::Point2f>& input1, std::vector<cv::Point2f>& output1, std::vector<cv::Point2f>& input2, std::vector<cv::Point2f>& output2) {
 	for (int i = 0; i < input1.size(); i++) {
 		output1.push_back(input1[i]);
@@ -72,8 +186,8 @@ int main() {
 	//for (int i = 0; i < 250; ++i)
 	//vidIn.read(image);
 	//read the panoramas in
+	pano = imread("Gallery_2_(2)_edited.png");
 	pano2 = imread("Gallery_2_(3).png");
-	pano = imread("Gallery_2_(2).png");
 
 	//std::cout << pano.cols << std::endl;
 	//compute keypoints
@@ -175,12 +289,32 @@ int main() {
 			}
 		}
 
+		std::vector<uchar> mask;
 
-		Mat transform = findHomography(pPts2,iPts2,RANSAC,3.0,noArray(),2000,0.995);
+
+		Mat transform = findHomography(pPts2,iPts2,RANSAC,3.0,mask,2000,0.995);
 		Mat proj;
 		warpPerspective(subImages2[i],proj,transform,subImages[i].size(),INTER_CUBIC | WARP_INVERSE_MAP, BORDER_CONSTANT, 0);
+		for (int j = 0, maskIdx = 0; j < pPts2.size(); ++j,++maskIdx) {
+			if (mask[maskIdx] == 1) {
+				pPts2.erase(pPts2.begin()+j);
+				iPts2.erase(iPts2.begin()+j);
+				--j;
+			}
+		}
+		/*
+		transform = findHomography(pPts2,iPts2,RANSAC,3.0,mask,2000,0.995);
+		warpPerspective(subImages2[i],proj,transform,subImages[i].size(),INTER_CUBIC | WARP_INVERSE_MAP, BORDER_CONSTANT,0);
+		*/
 		Mat diff;
 		absdiff(subImages[i],proj,diff);
+		Mat white(subImages2[i]);
+		compare(subImages2[i],Scalar(0,0,0),white,CMP_GT);
+		warpPerspective(white,white,transform,diff.size(),INTER_CUBIC|WARP_INVERSE_MAP, BORDER_CONSTANT, 0);
+		imshow("blargh",white);
+		bitwise_and(diff,white,diff);
+		compare(subImages[i],Scalar(0,0,0),white,CMP_GT);
+		bitwise_and(diff,white,diff);
 		diffs.push_back(diff);
 	}
 		int minheight = diffs[0].rows;
@@ -195,9 +329,15 @@ int main() {
 			hconcat(DiffPano, diffs[i], DiffPano);
 		}
 
-		imwrite("ExperimentalDifference3.png", DiffPano);
 
-		imshow("test", subImages[0]);
+		std::vector<std::vector<Point2i> > points;
+		findSquares(DiffPano,points);
+		std::cout<<"MEEEEE"<<std::endl;
+		drawSquares(DiffPano,points);
+
+		imwrite("ExperimentalDifference7.png", DiffPano);
+
+		imshow("test", DiffPano);
 		waitKey();
 	
 
