@@ -165,6 +165,247 @@ static void drawSquares(cv::Mat& image, const std::vector<std::vector<cv::Point>
 
     imshow("Squares", image);
 }
+
+enum Rotation
+{
+    ROT_0,
+    ROT_90,
+    ROT_180,
+    ROT_270
+};
+
+cv::Mat video2Panorama(cv::String filename, Rotation rot = ROT_0)
+{
+    using namespace cv;
+    //Create vectors and Mats
+    Mat image;
+    std::vector<Mat> images;
+    std::vector<Mat> transforms;
+    Mat panorama;
+    Mat affine(2, 3, CV_64F);
+
+    //Create ORB descriptors, memory, and matcher
+    std::vector<KeyPoint> pKps, iKps;
+    Mat pDesc, iDesc;
+    Ptr<ORB> pORB = ORB::create(10000);
+    Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming");
+    std::vector<DMatch> matches;
+
+    //Init Video Reader
+    VideoCapture vidIn(filename);
+    //Error Checking
+    if (!vidIn.isOpened())
+        return Mat();
+
+    //Init First Image
+    vidIn.read(image);
+    resize(image, image, Size(0, 0), 0.5, 0.5, INTER_AREA);
+
+    pORB->detectAndCompute(image, noArray(), pKps, pDesc);
+
+    affine.setTo(0);
+    if (rot == ROT_0)
+    {
+        affine.at<double>(0, 0) = 1;
+        affine.at<double>(1, 1) = 1;
+        affine.at<double>(0, 2) = image.rows / 2;
+    }
+    else if (rot == ROT_90)
+    {
+        affine.at<double>(0, 1) = -1; 
+        affine.at<double>(1, 0) = 1;
+        affine.at<double>(0, 2) = image.cols / 2;
+    }
+    else if (rot == ROT_180)
+    {
+        affine.at<double>(0, 0) = -1;
+        affine.at<double>(1, 1) = -1;
+        affine.at<double>(0, 2) = image.rows / 2;
+    }
+    else if (rot == ROT_270)
+    {
+        affine.at<double>(0, 1) = 1;
+        affine.at<double>(1, 0) = -1;
+        affine.at<double>(0, 2) = image.cols / 2;
+    }
+
+    images.push_back(image.clone());
+    transforms.push_back(affine.clone());
+
+
+    while (vidIn.read(image))
+    {
+        resize(image, image, Size(0, 0), 0.5, 0.5, INTER_AREA);
+        //Detect Keypoints and find matches
+        pORB->detectAndCompute(image, noArray(), iKps, iDesc);
+        matcher->match(iDesc, pDesc, matches);
+
+        double max_dist = 0; double min_dist = 100;
+        //-- Quick calculation of max and min distances between keypoints
+        for (int i = 0; i < iDesc.rows; i++)
+        {
+            double dist = matches[i].distance;
+            if (dist < min_dist)
+                min_dist = dist;
+            if (dist > max_dist)
+                max_dist = dist;
+        }
+
+        //-- Draw only "good" matches (i.e. whose distance is less than 3*min_dist )
+        std::vector< Point2f > pPts, iPts;
+        for (int i = 0; i < iDesc.rows; i++)
+        {
+            if (matches[i].distance < 5 * min_dist)
+            {
+                pPts.push_back(pKps[matches[i].trainIdx].pt);
+                iPts.push_back(iKps[matches[i].queryIdx].pt);
+            }
+        }
+
+        //If there are enough points
+        if (pPts.size() > 20)
+        {
+            //We want to match to the warped locations
+            transform(pPts, pPts, affine);
+
+            //Estimate transform from current image to warped previous
+            Mat temp = estimateRigidTransform(iPts, pPts, false);
+            //If it worked
+            if (!temp.empty())
+            {
+                //Save the image, transform, and set the new set of keypoints and descriptors
+                images.push_back(image.clone());
+                transforms.push_back(temp.clone());
+                pKps = iKps;
+                iDesc.copyTo(pDesc);
+                temp.copyTo(affine);
+            }
+        }
+    }
+
+    //Find the size of the panorama by transforming each of the four corners of the image and finding the bounds
+    std::vector<Point2f> testPoints, transformedPoints;
+    testPoints.push_back(Point2f(0, 0));
+    testPoints.push_back(Point2f(images[1].cols, 0));
+    testPoints.push_back(Point2f(0, images[1].rows));
+    testPoints.push_back(Point2f(images[1].cols, images[1].rows));
+    Size panoSize(0, 0), orig(10000, 10000);
+    for (int i = 0; i < images.size(); ++i)
+    {
+        transform(testPoints, transformedPoints, transforms[i]);
+        panoSize.width = MAX(cvCeil(transformedPoints[0].x), panoSize.width);
+        panoSize.width = MAX(cvCeil(transformedPoints[1].x), panoSize.width);
+        panoSize.width = MAX(cvCeil(transformedPoints[2].x), panoSize.width);
+        panoSize.width = MAX(cvCeil(transformedPoints[3].x), panoSize.width);
+        panoSize.height = MAX(cvCeil(transformedPoints[0].y), panoSize.height);
+        panoSize.height = MAX(cvCeil(transformedPoints[1].y), panoSize.height);
+        panoSize.height = MAX(cvCeil(transformedPoints[2].y), panoSize.height);
+        panoSize.height = MAX(cvCeil(transformedPoints[3].y), panoSize.height);
+
+        orig.width = MIN(cvFloor(transformedPoints[0].x), orig.width);
+        orig.width = MIN(cvFloor(transformedPoints[1].x), orig.width);
+        orig.width = MIN(cvFloor(transformedPoints[2].x), orig.width);
+        orig.width = MIN(cvFloor(transformedPoints[3].x), orig.width);
+        orig.height = MIN(cvFloor(transformedPoints[0].y), orig.height);
+        orig.height = MIN(cvFloor(transformedPoints[1].y), orig.height);
+        orig.height = MIN(cvFloor(transformedPoints[2].y), orig.height);
+        orig.height = MIN(cvFloor(transformedPoints[3].y), orig.height);
+    }
+
+    panoSize.height -= orig.height;
+    panoSize.width -= orig.width;
+
+
+    //Smooth the vertical direction
+    Mat avg(1, images.size(), CV_64F), runningAvg, rotation;
+
+
+    //Smooth the rotation so it doesn't fall off the way it did before.
+    for (int i = 0; i < images.size(); ++i)
+    {
+        double angle = atan2(-transforms[i].at<double>(0, 1), transforms[i].at<double>(0, 0));
+        avg.at<double>(i) = angle * 180 / CV_PI;
+    }
+
+    blur(avg, runningAvg, Size(300, 1), Point(-1, -1), BORDER_REPLICATE);
+    for (int i = 0; i < images.size(); ++i)
+    {
+        rotation = getRotationMatrix2D(Point2f(images[i].cols / 2, images[i].rows / 2), (runningAvg.at<double>(i) - avg.at<double>(0)), 1);
+        transforms[i](Rect(0, 0, 3, 2)) = rotation(Rect(0, 0, 2, 2)) * transforms[i](Rect(0, 0, 3, 2));
+        transforms[i].at<double>(0, 2) += rotation.at<double>(0, 2);
+        transforms[i].at<double>(1, 2) += rotation.at<double>(1, 2);
+    }
+
+    for (int i = 0; i < images.size(); ++i)
+        avg.at<double>(i) = transforms[i].at<double>(1, 2);
+    //for (int i = 0; i < images.size(); ++i)
+    //    avg.at<double>(i) = transforms[i].at<double>(0, 2);
+
+    blur(avg, runningAvg, Size(150, 1), Point(-1, -1), BORDER_REPLICATE);
+
+    //Adjust the size by that smoothing
+    double min, max;
+    minMaxIdx(runningAvg, &min, &max);
+    panoSize.height -= max;
+
+    subtract(avg, runningAvg, avg);
+    //add(avg, orig.height, avg);
+
+    for (int i = 0; i < images.size(); ++i)
+        transforms[i].at<double>(1, 2) = avg.at<double>(i);
+    //for (int i = 0; i < images.size(); ++i)
+    //    transforms[i].at<double>(0, 2) = avg.at<double>(i);
+
+    panoSize.width = 0;
+    panoSize.height = 0;
+    for (int i = 0; i < images.size(); ++i)
+    {
+        transform(testPoints, transformedPoints, transforms[i]);
+        panoSize.width = MAX(cvCeil(transformedPoints[0].x), panoSize.width);
+        panoSize.width = MAX(cvCeil(transformedPoints[1].x), panoSize.width);
+        panoSize.width = MAX(cvCeil(transformedPoints[2].x), panoSize.width);
+        panoSize.width = MAX(cvCeil(transformedPoints[3].x), panoSize.width);
+        panoSize.height = MAX(cvCeil(transformedPoints[0].y), panoSize.height);
+        panoSize.height = MAX(cvCeil(transformedPoints[1].y), panoSize.height);
+        panoSize.height = MAX(cvCeil(transformedPoints[2].y), panoSize.height);
+        panoSize.height = MAX(cvCeil(transformedPoints[3].y), panoSize.height);
+    }
+
+
+    //Create the panorama
+    panorama.create(panoSize, CV_8UC3);
+    panorama.setTo(0);
+    cv::Mat tempPano(panoSize, CV_8UC3);
+    cv::Mat maskPano(panoSize, CV_8UC3);
+    cv::Mat mask(images[0].rows, images[0].cols, CV_8UC1);
+    mask.setTo(0);
+    int size = 0;
+    for (int i = 0; i < images.size()-1; ++i)
+    {
+        size = MAX(size, abs(transforms[i+1].at<double>(0, 2) - transforms[i].at<double>(0, 2)));
+    }
+    if (rot == ROT_0 || rot == ROT_180)
+        mask.colRange(mask.cols / 2 - size, mask.cols / 2 + size).setTo(255);
+    else
+        mask.rowRange(mask.rows / 2-50, mask.rows / 2+50).setTo(255);
+
+    //Warp the images to the panorama   
+    for (int i = 0; i < images.size(); ++i)
+    {
+        warpAffine(images[i], tempPano, transforms[i], Size(panorama.cols, panorama.rows), 1, BORDER_TRANSPARENT);
+        warpAffine(mask, maskPano, transforms[i], Size(panorama.cols, panorama.rows), 1, BORDER_CONSTANT);
+        tempPano.copyTo(panorama, maskPano);
+    }
+
+    return panorama;
+}
+
+const int SECTION_HEIGHT = 50;
+
+int impose(int x) {
+    return x%SECTION_HEIGHT;
+}
+
 void bubbleSort(std::vector<cv::Point2f>& input1, std::vector<cv::Point2f>& output1, std::vector<cv::Point2f>& input2, std::vector<cv::Point2f>& output2) {
     for (int i = 0; i < input1.size(); i++) {
         output1.push_back(input1[i]);
@@ -202,22 +443,15 @@ void bubbleSort(std::vector<cv::Point2f>& input1, std::vector<cv::Point2f>& outp
     }
 }
 
-int main() {
-
+cv::Mat diffPanoramas(cv::Mat& pano, cv::Mat& pano2)
+{
     using namespace cv;
-    //dist::init(1280, 720);
 
-    Mat pano, pano2, image;
+    Mat image;
     Ptr<ORB> pORB = ORB::create(10000);
     Ptr<ORB> iORB = ORB::create(2000);
     std::vector<KeyPoint> pKps, iKps;
     Mat pDesc, iDesc;
-
-    //for (int i = 0; i < 250; ++i)
-    //vidIn.read(image);
-    //read the panoramas in
-    pano = imread("Gallery_2_(2).png");
-    pano2 = imread("Gallery_2_(3).png");
 
     //std::cout << pano.cols << std::endl;
     //compute keypoints
@@ -378,16 +612,41 @@ int main() {
 
     std::vector<std::vector<Point2i> > points;
     findSquares(DiffPano, points);
-    std::cout << "MEEEEE" << std::endl;
     drawSquares(DiffPano, points);
 
     imwrite("ExperimentalDifference7.png", DiffPano);
 
     imshow("test", DiffPano);
     waitKey();
+    return DiffPano;
+}
 
+int main()
+{
+    using namespace cv;
+    cv::Mat pano;
+    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150507.mp4");
+    //imwrite("OpenGallery_1.png", pano);
 
+    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150713.mp4");
+    //imwrite("StatueGallery1_1.png", pano);
+    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150815.mp4");
+    //imwrite("StatueGallery2_1.png", pano);
 
+    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150941.mp4");
+    //imwrite("ReflectionGallery_1.png", pano);
+    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151119.mp4");
+    //imwrite("ReflectionGallery_2.png", pano);
+
+    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151347.mp4");
+    //imwrite("PhotoGallery_1.png", pano);
+    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151523.mp4");
+    //imwrite("PhotoGallery_2.png", pano);
+    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151611.mp4");
+    //imwrite("PhotoGallery_3.png", pano);
+
+    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151708.mp4", ROT_90);
+    imwrite("OpenGallery_2.png", pano);
 
     return 0;
 }
