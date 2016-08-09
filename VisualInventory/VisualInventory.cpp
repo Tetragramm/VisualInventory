@@ -282,40 +282,7 @@ cv::Mat video2Panorama(cv::String filename, Rotation rot = ROT_0)
             }
         }
     }
-
-    //Find the size of the panorama by transforming each of the four corners of the image and finding the bounds
-    std::vector<Point2f> testPoints, transformedPoints;
-    testPoints.push_back(Point2f(0, 0));
-    testPoints.push_back(Point2f(images[1].cols, 0));
-    testPoints.push_back(Point2f(0, images[1].rows));
-    testPoints.push_back(Point2f(images[1].cols, images[1].rows));
-    Size panoSize(0, 0), orig(10000, 10000);
-    for (int i = 0; i < images.size(); ++i)
-    {
-        transform(testPoints, transformedPoints, transforms[i]);
-        panoSize.width = MAX(cvCeil(transformedPoints[0].x), panoSize.width);
-        panoSize.width = MAX(cvCeil(transformedPoints[1].x), panoSize.width);
-        panoSize.width = MAX(cvCeil(transformedPoints[2].x), panoSize.width);
-        panoSize.width = MAX(cvCeil(transformedPoints[3].x), panoSize.width);
-        panoSize.height = MAX(cvCeil(transformedPoints[0].y), panoSize.height);
-        panoSize.height = MAX(cvCeil(transformedPoints[1].y), panoSize.height);
-        panoSize.height = MAX(cvCeil(transformedPoints[2].y), panoSize.height);
-        panoSize.height = MAX(cvCeil(transformedPoints[3].y), panoSize.height);
-
-        orig.width = MIN(cvFloor(transformedPoints[0].x), orig.width);
-        orig.width = MIN(cvFloor(transformedPoints[1].x), orig.width);
-        orig.width = MIN(cvFloor(transformedPoints[2].x), orig.width);
-        orig.width = MIN(cvFloor(transformedPoints[3].x), orig.width);
-        orig.height = MIN(cvFloor(transformedPoints[0].y), orig.height);
-        orig.height = MIN(cvFloor(transformedPoints[1].y), orig.height);
-        orig.height = MIN(cvFloor(transformedPoints[2].y), orig.height);
-        orig.height = MIN(cvFloor(transformedPoints[3].y), orig.height);
-    }
-
-    panoSize.height -= orig.height;
-    panoSize.width -= orig.width;
-
-
+    
     //Smooth the vertical direction
     Mat avg(1, images.size(), CV_64F), runningAvg, rotation;
 
@@ -343,21 +310,35 @@ cv::Mat video2Panorama(cv::String filename, Rotation rot = ROT_0)
 
     blur(avg, runningAvg, Size(150, 1), Point(-1, -1), BORDER_REPLICATE);
 
-    //Adjust the size by that smoothing
-    double min, max;
-    minMaxIdx(runningAvg, &min, &max);
-    panoSize.height -= max;
-
     subtract(avg, runningAvg, avg);
-    //add(avg, orig.height, avg);
 
     for (int i = 0; i < images.size(); ++i)
         transforms[i].at<double>(1, 2) = avg.at<double>(i);
     //for (int i = 0; i < images.size(); ++i)
     //    transforms[i].at<double>(0, 2) = avg.at<double>(i);
 
-    panoSize.width = 0;
-    panoSize.height = 0;
+    //Find the size of the panorama by transforming each of the four corners of the image and finding the bounds
+    std::vector<Point2f> testPoints, transformedPoints;
+    Size panoSize(0, 0), orig(10000, 10000);
+    int size = 0;
+    for (int i = 0; i < images.size() - 1; ++i)
+    {
+        size = MAX(size, abs(transforms[i + 1].at<double>(0, 2) - transforms[i].at<double>(0, 2)));
+    }
+    if (rot == ROT_0 || rot == ROT_180)
+    {
+        testPoints.push_back(cv::Point2f(images[0].cols / 2 - size, 0));
+        testPoints.push_back(cv::Point2f(images[0].cols / 2 + size, 0));
+        testPoints.push_back(cv::Point2f(images[0].cols / 2 - size, images[0].rows));
+        testPoints.push_back(cv::Point2f(images[0].cols / 2 + size, images[0].rows));
+    }
+    else
+    {
+        testPoints.push_back(cv::Point2f(0, images[0].rows / 2 - size));
+        testPoints.push_back(cv::Point2f(0, images[0].rows / 2 + size));
+        testPoints.push_back(cv::Point2f(images[0].cols, images[0].rows / 2 - size));
+        testPoints.push_back(cv::Point2f(images[0].cols, images[0].rows / 2 + size));
+    }
     for (int i = 0; i < images.size(); ++i)
     {
         transform(testPoints, transformedPoints, transforms[i]);
@@ -369,8 +350,25 @@ cv::Mat video2Panorama(cv::String filename, Rotation rot = ROT_0)
         panoSize.height = MAX(cvCeil(transformedPoints[1].y), panoSize.height);
         panoSize.height = MAX(cvCeil(transformedPoints[2].y), panoSize.height);
         panoSize.height = MAX(cvCeil(transformedPoints[3].y), panoSize.height);
+
+        orig.width = MIN(cvFloor(transformedPoints[0].x), orig.width);
+        orig.width = MIN(cvFloor(transformedPoints[1].x), orig.width);
+        orig.width = MIN(cvFloor(transformedPoints[2].x), orig.width);
+        orig.width = MIN(cvFloor(transformedPoints[3].x), orig.width);
+        orig.height = MIN(cvFloor(transformedPoints[0].y), orig.height);
+        orig.height = MIN(cvFloor(transformedPoints[1].y), orig.height);
+        orig.height = MIN(cvFloor(transformedPoints[2].y), orig.height);
+        orig.height = MIN(cvFloor(transformedPoints[3].y), orig.height);
     }
 
+    panoSize.width -= orig.width;
+    panoSize.height -= orig.height;
+
+    for (int i = 0; i < images.size(); ++i)
+    {
+        transforms[i].at<double>(0, 2) -= orig.width;
+        transforms[i].at<double>(1, 2) -= orig.height;
+    }
 
     //Create the panorama
     panorama.create(panoSize, CV_8UC3);
@@ -379,11 +377,6 @@ cv::Mat video2Panorama(cv::String filename, Rotation rot = ROT_0)
     cv::Mat maskPano(panoSize, CV_8UC3);
     cv::Mat mask(images[0].rows, images[0].cols, CV_8UC1);
     mask.setTo(0);
-    int size = 0;
-    for (int i = 0; i < images.size()-1; ++i)
-    {
-        size = MAX(size, abs(transforms[i+1].at<double>(0, 2) - transforms[i].at<double>(0, 2)));
-    }
     if (rot == ROT_0 || rot == ROT_180)
         mask.colRange(mask.cols / 2 - size, mask.cols / 2 + size).setTo(255);
     else
@@ -625,25 +618,25 @@ int main()
 {
     using namespace cv;
     cv::Mat pano;
-    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150507.mp4");
-    //imwrite("OpenGallery_1.png", pano);
+    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150507.mp4");
+    imwrite("OpenGallery_1.png", pano);
 
-    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150713.mp4");
-    //imwrite("StatueGallery1_1.png", pano);
-    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150815.mp4");
-    //imwrite("StatueGallery2_1.png", pano);
+    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150713.mp4");
+    imwrite("StatueGallery1_1.png", pano);
+    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150815.mp4");
+    imwrite("StatueGallery2_1.png", pano);
 
-    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150941.mp4");
-    //imwrite("ReflectionGallery_1.png", pano);
-    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151119.mp4");
-    //imwrite("ReflectionGallery_2.png", pano);
+    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150941.mp4");
+    imwrite("ReflectionGallery_1.png", pano);
+    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151119.mp4");
+    imwrite("ReflectionGallery_2.png", pano);
 
-    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151347.mp4");
-    //imwrite("PhotoGallery_1.png", pano);
-    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151523.mp4");
-    //imwrite("PhotoGallery_2.png", pano);
-    //pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151611.mp4");
-    //imwrite("PhotoGallery_3.png", pano);
+    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151347.mp4");
+    imwrite("PhotoGallery_1.png", pano);
+    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151523.mp4");
+    imwrite("PhotoGallery_2.png", pano);
+    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151611.mp4");
+    imwrite("PhotoGallery_3.png", pano);
 
     pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151708.mp4", ROT_90);
     imwrite("OpenGallery_2.png", pano);
