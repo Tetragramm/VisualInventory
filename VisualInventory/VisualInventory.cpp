@@ -614,32 +614,120 @@ cv::Mat diffPanoramas(cv::Mat& pano, cv::Mat& pano2)
     return DiffPano;
 }
 
+cv::Mat diffPanoramas2(cv::Mat& pano1, cv::Mat& pano2)
+{
+    using namespace cv;
+
+    Ptr<ORB> iORB = ORB::create(2000);
+    Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming");
+
+    int steps = pano1.cols / 500;
+    for (int s = 0; s < steps; ++s)
+    {
+        Rect roi1;
+        if ((s + 1) == steps)
+            roi1 = Rect(s * 500, 0, 500+pano1.cols%500, pano1.rows);
+        else
+            roi1 = Rect(s * 500, 0, 500, pano1.rows);
+
+        float bestDist = FLT_MAX;
+        int bestSect = 0;
+        std::vector<KeyPoint> kps1, kps2;
+        Mat desc1, desc2;
+        std::vector<DMatch> matches;
+        std::vector<Point2f> pts1, pts2;
+
+        iORB->detectAndCompute(pano1(roi1), noArray(), kps1, desc1);
+
+        int sect2 = 0;
+        do
+        {
+            Rect roi2;
+            if (sect2 + 1500 >= pano2.cols)
+                roi2 = Rect(sect2, 0, pano2.cols - sect2, pano2.rows);
+            else
+                roi2 = Rect(sect2, 0, 1000, pano2.rows);
+
+            kps2.clear();
+            desc2 = Mat();
+            iORB->detectAndCompute(pano2(roi2), noArray(), kps2, desc2);
+
+            matches.clear();
+            matcher->match(desc1, desc2, matches);
+            
+            float thisDist = 0;
+            for (int j = 0; j < matches.size(); ++j)
+                thisDist += matches[j].distance;
+
+            if (thisDist < bestDist)
+            {
+                bestDist = thisDist;
+                bestSect = sect2;
+                pts1.clear();
+                pts2.clear();
+                double max_dist = 0; double min_dist = 100;
+
+                for (int j = 0; j < matches.size(); j++)
+                {
+                    double dist = matches[j].distance;
+                    if (dist < min_dist)
+                        min_dist = dist;
+                    if (dist > max_dist)
+                        max_dist = dist;
+                }
+
+                for (int j = 0; j < matches.size(); j++)
+                {
+                    if (matches[j].distance <= MAX(10 * min_dist, 0.02))
+                    {
+                        pts1.push_back(kps1[matches[j].queryIdx].pt);
+                        pts2.push_back(kps2[matches[j].trainIdx].pt);
+                    }
+                }
+            }
+
+            sect2 += 500;
+        } while (sect2 + 1500 < pano2.cols);
+
+        Mat transform(3, 3, CV_32F);
+        setIdentity(transform);
+        if (pts1.size() > 4)
+        {
+            transform = findHomography(pts1, pts2, RANSAC);
+            std::cout << pts1.size() << "\n";
+            std::cout << transform << "\n\n";
+        }
+
+        Mat temp = pano1(roi1).clone();
+        Rect bestROI = Rect(bestSect, 0, 1000, pano2.rows);
+        Mat drawM;
+        KeyPoint::convert(pts1, kps1);
+        KeyPoint::convert(pts2, kps2);
+        matches.clear();
+        for (int i = 0; i < pts1.size(); ++i)
+            matches.push_back(DMatch(i, i, 0));
+        drawMatches(temp, kps1, pano2(bestROI), kps2, matches, drawM);
+        //imshow("matches", drawM);
+        warpPerspective(pano2(bestROI), temp, transform, Size(temp.cols, temp.rows), WARP_INVERSE_MAP, BORDER_TRANSPARENT);
+        absdiff(temp, pano1(roi1), pano1(roi1));
+
+        //imshow("Section", pano1(roi1));
+        //cv::waitKey();
+    }
+    return pano1;
+}
+
 int main()
 {
     using namespace cv;
-    cv::Mat pano;
-    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150507.mp4");
-    imwrite("OpenGallery_1.png", pano);
+    using namespace cv::saliency;
+    Mat pano1, pano2;
+    pano1 = imread("ReflectionGallery_1.png");
+    pano2 = imread("ReflectionGallery_2.png");
 
-    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150713.mp4");
-    imwrite("StatueGallery1_1.png", pano);
-    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150815.mp4");
-    imwrite("StatueGallery2_1.png", pano);
-
-    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_150941.mp4");
-    imwrite("ReflectionGallery_1.png", pano);
-    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151119.mp4");
-    imwrite("ReflectionGallery_2.png", pano);
-
-    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151347.mp4");
-    imwrite("PhotoGallery_1.png", pano);
-    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151523.mp4");
-    imwrite("PhotoGallery_2.png", pano);
-    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151611.mp4");
-    imwrite("PhotoGallery_3.png", pano);
-
-    pano = video2Panorama("F:\\Users\\Tetragramm\\Phone Camera\\DCIM\\Camera\\20160725_151708.mp4", ROT_90);
-    imwrite("OpenGallery_2.png", pano);
+    Mat diff = diffPanoramas2(pano1, pano2);
+    imwrite("ExperimentalDifference_type2_1.png", diff);
+    waitKey();
 
     return 0;
 }
