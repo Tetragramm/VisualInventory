@@ -52,7 +52,8 @@
 #undef sign
 #include "CameraDistortion.h"
 
-int threshHigh = 255, N = 1;
+#define SQUARE(x) ((x)*(x))
+int threshHigh = 255, N = 4;
 int threshLow = 150;
 
 
@@ -70,6 +71,9 @@ static void findSquares(const cv::Mat& image, std::vector<std::vector<cv::Point>
     using namespace cv;
     squares.clear();
 
+    if (image.channels() == 0)
+        return;
+
     Mat pyr, timg, temp(image.size(), CV_8U), gray, gray0;
 
     // down-scale and upscale the image to filter out the noise
@@ -77,14 +81,27 @@ static void findSquares(const cv::Mat& image, std::vector<std::vector<cv::Point>
     pyrUp(pyr, timg, image.size());
     std::vector<std::vector<Point> > contours;
 
-
     // find squares in every color plane of the image
-    for (int c = 0; c < 3; c++)
+    for (int c = 0; c < image.channels()+1; c++)
     {
         gray0.create(image.size(), CV_8U);
-        int ch[] = { c, 0 };
-        mixChannels(&timg, 1, &gray0, 1, ch, 1);
-        //imshow("gray0", gray0);
+        if (c < image.channels())
+        {
+            int ch[] = { c, 0 };
+            mixChannels(&timg, 1, &gray0, 1, ch, 1);
+        }
+        else if(image.channels() == 3)
+        {
+            cvtColor(timg, gray0, COLOR_BGR2GRAY);
+        }
+        else if (image.channels() == 4)
+        {
+            cvtColor(timg, gray0, COLOR_BGRA2GRAY);
+        }
+        else
+        {
+            return;
+        }
 
         // try several threshold levels
         for (int l = 0; l < N; l++)
@@ -163,7 +180,7 @@ static void drawSquares(cv::Mat& image, const std::vector<std::vector<cv::Point>
         polylines(image, &p, &n, 1, true, Scalar(0, 255, 0), 3, LINE_AA);
     }
 
-    imshow("Squares", image);
+    //imshow("Squares", image);
 }
 
 enum Rotation
@@ -614,108 +631,187 @@ cv::Mat diffPanoramas(cv::Mat& pano, cv::Mat& pano2)
     return DiffPano;
 }
 
-cv::Mat diffPanoramas2(cv::Mat& pano1, cv::Mat& pano2)
+class PanoRegistration
 {
-    using namespace cv;
+private:
+    std::vector<cv::Mat> transformations;
+    std::vector<cv::Rect> roi_From, roi_To;
 
-    Ptr<ORB> iORB = ORB::create(2000);
-    Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming");
-
-    int steps = pano1.cols / 500;
-    for (int s = 0; s < steps; ++s)
+public:
+    float registration(cv::Mat& pano1, cv::Mat& pano2)
     {
-        Rect roi1;
-        if ((s + 1) == steps)
-            roi1 = Rect(s * 500, 0, 500+pano1.cols%500, pano1.rows);
-        else
-            roi1 = Rect(s * 500, 0, 500, pano1.rows);
+        using namespace cv;
 
-        float bestDist = FLT_MAX;
-        int bestSect = 0;
-        std::vector<KeyPoint> kps1, kps2;
-        Mat desc1, desc2;
-        std::vector<DMatch> matches;
-        std::vector<Point2f> pts1, pts2;
+        Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming");
 
-        iORB->detectAndCompute(pano1(roi1), noArray(), kps1, desc1);
+        int count = 0;
+        int countGood = 0;
 
-        int sect2 = 0;
-        do
+        int stepsize = 500;
+        int stepsize2 = 1000;
+        int steps = pano1.cols / stepsize;
+        for (int s = 0; s < steps; ++s)
         {
-            Rect roi2;
-            if (sect2 + 1500 >= pano2.cols)
-                roi2 = Rect(sect2, 0, pano2.cols - sect2, pano2.rows);
+            Rect roi1;
+            if ((s + 1) == steps)
+                roi1 = Rect(s * stepsize, 0, stepsize + pano1.cols%stepsize, pano1.rows);
             else
-                roi2 = Rect(sect2, 0, 1000, pano2.rows);
+                roi1 = Rect(s * stepsize, 0, stepsize, pano1.rows);
 
-            kps2.clear();
-            desc2 = Mat();
-            iORB->detectAndCompute(pano2(roi2), noArray(), kps2, desc2);
+            float bestDist = FLT_MAX;
+            int bestSect = 0;
+            std::vector<KeyPoint> kps1, kps2;
+            Mat desc1, desc2;
+            std::vector<DMatch> matches;
+            std::vector<Point2f> pts1, pts2;
 
-            matches.clear();
-            matcher->match(desc1, desc2, matches);
-            
-            float thisDist = 0;
-            for (int j = 0; j < matches.size(); ++j)
-                thisDist += matches[j].distance;
-
-            if (thisDist < bestDist)
+            int thresh = 20;
+            while (thresh > 1)
             {
-                bestDist = thisDist;
-                bestSect = sect2;
-                pts1.clear();
-                pts2.clear();
-                double max_dist = 0; double min_dist = 100;
-
-                for (int j = 0; j < matches.size(); j++)
+                Ptr<ORB> iORB = ORB::create(2000, 1.2, 8, 31, 0, 2, 0, 31, thresh);
+                iORB->detect(pano1(roi1), kps1);
+                if (kps1.size() > 1990 || thresh == 2)
                 {
-                    double dist = matches[j].distance;
-                    if (dist < min_dist)
-                        min_dist = dist;
-                    if (dist > max_dist)
-                        max_dist = dist;
+                    iORB->compute(pano1(roi1), kps1, desc1);
+                    break;
                 }
-
-                for (int j = 0; j < matches.size(); j++)
-                {
-                    if (matches[j].distance <= MAX(10 * min_dist, 0.02))
-                    {
-                        pts1.push_back(kps1[matches[j].queryIdx].pt);
-                        pts2.push_back(kps2[matches[j].trainIdx].pt);
-                    }
-                }
+                thresh--;
             }
 
-            sect2 += 500;
-        } while (sect2 + 1500 < pano2.cols);
+            int sect2 = 0;
+            do
+            {
+                Rect roi2;
+                if (sect2 + (stepsize2 + 500) >= pano2.cols)
+                    roi2 = Rect(sect2, 0, pano2.cols - sect2, pano2.rows);
+                else
+                    roi2 = Rect(sect2, 0, stepsize2, pano2.rows);
 
-        Mat transform(3, 3, CV_32F);
-        setIdentity(transform);
-        if (pts1.size() > 4)
-        {
-            transform = findHomography(pts1, pts2, RANSAC);
-            std::cout << pts1.size() << "\n";
-            std::cout << transform << "\n\n";
+                kps2.clear();
+                desc2 = Mat();
+                int thresh = 20;
+                while (thresh > 1)
+                {
+                    Ptr<ORB> iORB = ORB::create(6000, 1.2, 8, 31, 0, 2, 0, 31, thresh);
+                    iORB->detect(pano2(roi2), kps2);
+                    if (kps2.size() > 1990 || thresh == 2)
+                    {
+                        iORB->compute(pano2(roi2), kps2, desc2);
+                        break;
+                    }
+                    thresh--;
+                }
+
+                matches.clear();
+                matcher->match(desc1, desc2, matches);
+
+                float thisDist = 0;
+                for (int j = 0; j < matches.size(); ++j)
+                    thisDist += matches[j].distance;
+
+                if (thisDist < bestDist)
+                {
+                    bestDist = thisDist;
+                    bestSect = sect2;
+                    pts1.clear();
+                    pts2.clear();
+                    double max_dist = 0; double min_dist = 100;
+
+                    for (int j = 0; j < matches.size(); j++)
+                    {
+                        double dist = matches[j].distance;
+                        if (dist < min_dist)
+                            min_dist = dist;
+                        if (dist > max_dist)
+                            max_dist = dist;
+                    }
+
+                    for (int j = 0; j < matches.size(); j++)
+                    {
+                        if (matches[j].distance <= MAX(10 * min_dist, 0.02))
+                        {
+                            pts1.push_back(kps1[matches[j].queryIdx].pt);
+                            pts2.push_back(kps2[matches[j].trainIdx].pt);
+                        }
+                    }
+                }
+
+                //cv::Mat img;
+                //cv::drawMatches(pano1(roi1), kps1, pano2(roi2), kps2, matches, img);
+                //imshow("Matches", img);
+                //cv::waitKey();
+
+                sect2 += 500;
+            } while (sect2 + (stepsize2 + 500) < pano2.cols);
+
+            Mat transHomography(3, 3, CV_32F);
+            setIdentity(transHomography);
+            double dist = 1000;
+            if (pts1.size() > 4)
+            {
+                dist = 0;
+                transHomography = findHomography(pts1, pts2, RANSAC);
+                std::vector<Point3f> homgPts;
+                transform(pts1, homgPts, transHomography);
+                for (int i = 0; i < pts1.size(); ++i)
+                    dist += sqrt(SQUARE(homgPts[i].x - pts2[i].x) + SQUARE(homgPts[i].y - pts2[i].y));
+                dist /= pts1.size();
+                std::cout << pts1.size() << "\n";
+                std::cout << dist << "\n\n";
+            }
+
+            if (dist < 500)
+            {
+                Rect bestROI = Rect(bestSect, 0, stepsize2, pano2.rows);
+                //imshow("matches", drawM);
+                roi_From.push_back(bestROI);
+                roi_To.push_back(roi1);
+                transformations.push_back(transHomography);
+                count++;
+                countGood++;
+            }
+            else
+            {
+                std::cout << "SKIPPED!\n\n";
+                roi_From.push_back(Rect());
+                roi_To.push_back(roi1);
+                transformations.push_back(Mat());
+                count++;
+            }
         }
-
-        Mat temp = pano1(roi1).clone();
-        Rect bestROI = Rect(bestSect, 0, 1000, pano2.rows);
-        Mat drawM;
-        KeyPoint::convert(pts1, kps1);
-        KeyPoint::convert(pts2, kps2);
-        matches.clear();
-        for (int i = 0; i < pts1.size(); ++i)
-            matches.push_back(DMatch(i, i, 0));
-        drawMatches(temp, kps1, pano2(bestROI), kps2, matches, drawM);
-        //imshow("matches", drawM);
-        warpPerspective(pano2(bestROI), temp, transform, Size(temp.cols, temp.rows), WARP_INVERSE_MAP, BORDER_TRANSPARENT);
-        absdiff(temp, pano1(roi1), pano1(roi1));
-
-        //imshow("Section", pano1(roi1));
-        //cv::waitKey();
+        return (float)countGood/count;
     }
-    return pano1;
-}
+
+    cv::Mat diff(cv::Mat& pano1, cv::Mat& pano2)
+    {
+        using namespace cv;
+        Mat pano = pano1.clone();
+        for (int s = 0; s < roi_From.size(); ++s)
+        {
+            if (transformations[s].rows == 3 && transformations[s].cols == 3)
+            {
+                Rect roiTo = roi_To[s];
+                Rect roiFrom = roi_From[s];
+                Rect bestROI = roi_From[s];
+                Mat transHomography = transformations[s];
+                Mat mask, mask2, maskTrans;
+                inRange(pano(roiTo), Scalar(1, 1, 1), Scalar(255, 255, 255), mask);
+                inRange(pano2(roiFrom), Scalar(1, 1, 1), Scalar(255, 255, 255), mask2);
+                warpPerspective(mask2, maskTrans, transHomography, roiTo.size(), WARP_INVERSE_MAP, BORDER_CONSTANT);
+                bitwise_and(maskTrans, mask, mask);
+                bitwise_not(mask, mask);
+                warpPerspective(pano2(bestROI), pano(roiTo), transHomography, roiTo.size(), WARP_INVERSE_MAP, BORDER_TRANSPARENT);
+                absdiff(pano(roiTo), pano1(roiTo), pano(roiTo));
+                pano(roiTo).setTo(0, mask);
+            }
+            else
+            {
+                pano(roi_To[s]).setTo(0);
+            }
+        }
+        return pano;
+    }
+};
 
 int main()
 {
@@ -725,8 +821,35 @@ int main()
     pano1 = imread("ReflectionGallery_1.png");
     pano2 = imread("ReflectionGallery_2.png");
 
-    Mat diff = diffPanoramas2(pano1, pano2);
-    imwrite("ExperimentalDifference_type2_1.png", diff);
+    PanoRegistration pR;
+    pR.registration(pano1, pano2);
+    Mat diff = pR.diff(pano1, pano2);
+    std::vector<std::vector<Point>> squares;
+    findSquares(diff, squares);
+    drawSquares(diff, squares);
+    imwrite("ExperimentalDifference_type2_3.png", diff);
+
+    Mat hsv1, hsv2;
+    std::vector<Mat> diff2;
+    cvtColor(pano1, hsv1, COLOR_BGR2HSV);
+    cvtColor(pano2, hsv2, COLOR_BGR2HSV);
+    diff = pR.diff(hsv1, hsv2);
+    split(diff, diff2);
+
+    findSquares(diff2[0], squares);
+    cvtColor(diff2[0], diff2[0], COLOR_GRAY2BGR);
+    drawSquares(diff2[0], squares);
+    imwrite("ExperimentalDifference_type2_H.png", diff2[0]);
+
+    findSquares(diff2[1], squares);
+    cvtColor(diff2[1], diff2[1], COLOR_GRAY2BGR);
+    drawSquares(diff2[1], squares);
+    imwrite("ExperimentalDifference_type2_S.png", diff2[1]);
+
+    findSquares(diff2[2], squares);
+    cvtColor(diff2[2], diff2[2], COLOR_GRAY2BGR);
+    drawSquares(diff2[2], squares);
+    imwrite("ExperimentalDifference_type2_V.png", diff2[2]);
     waitKey();
 
     return 0;
